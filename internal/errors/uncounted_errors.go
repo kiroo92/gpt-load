@@ -3,9 +3,14 @@ package errors
 import "strings"
 
 // unCountedSubstrings contains a list of substrings that indicate an error
+// that should NOT count towards the blacklist threshold (temporary/transient errors).
 var unCountedSubstrings = []string{
 	"resource has been exhausted",
 	"please reduce the length of the messages",
+	"rate limit reached",
+	"tokens per min",
+	"requests per min",
+	"rate_limit_exceeded",
 }
 
 // IsUnCounted checks if the given error message contains substrings

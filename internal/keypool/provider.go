@@ -36,55 +36,104 @@ func NewProvider(db *gorm.DB, store store.Store, settingsManager *config.SystemS
 
 // SelectKey 为指定的分组原子性地选择并轮换一个可用的 APIKey。
 func (p *KeyProvider) SelectKey(groupID uint) (*models.APIKey, error) {
+	return p.SelectKeyWithExclusion(groupID, nil)
+}
+
+// maxSelectAttempts limits how many Rotate calls we make before giving up.
+// This prevents scanning the entire list when there are tens of thousands of keys.
+// In practice, with random distribution, a usable key is found within a few attempts.
+const maxSelectAttempts = 50
+
+// SelectKeyWithExclusion 选择一个可用的 APIKey，跳过排除列表中的 key 和处于冷却期的 key。
+func (p *KeyProvider) SelectKeyWithExclusion(groupID uint, excludeKeyIDs []uint) (*models.APIKey, error) {
 	activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
 
-	// 1. Atomically rotate the key ID from the list
-	keyIDStr, err := p.store.Rotate(activeKeysListKey)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, app_errors.ErrNoActiveKeys
+	// Build exclusion set for O(1) lookup
+	excludeSet := make(map[uint]struct{}, len(excludeKeyIDs))
+	for _, id := range excludeKeyIDs {
+		excludeSet[id] = struct{}{}
+	}
+
+	// Determine max attempts: min(maxSelectAttempts, excludeCount + cooldownBuffer)
+	// If we have very few exclusions, we don't need many attempts.
+	// If no exclusions and no cooldowns, first attempt succeeds.
+	attempts := maxSelectAttempts
+	if len(excludeKeyIDs) < 10 {
+		// With few exclusions, limit attempts more aggressively
+		attempts = len(excludeKeyIDs) + 10
+	}
+
+	for i := 0; i < attempts; i++ {
+		keyIDStr, err := p.store.Rotate(activeKeysListKey)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, app_errors.ErrNoActiveKeys
+			}
+			return nil, fmt.Errorf("failed to rotate key from store: %w", err)
 		}
-		return nil, fmt.Errorf("failed to rotate key from store: %w", err)
+
+		keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse key ID '%s': %w", keyIDStr, err)
+		}
+
+		// Check exclusion list (O(1))
+		if _, excluded := excludeSet[uint(keyID)]; excluded {
+			continue
+		}
+
+		// Check cooldown (single Redis EXISTS call)
+		cooldownKey := fmt.Sprintf("cooldown:%d", keyID)
+		isCooling, _ := p.store.Exists(cooldownKey)
+		if isCooling {
+			continue
+		}
+
+		// Key is usable, get its details
+		keyHashKey := fmt.Sprintf("key:%d", keyID)
+		keyDetails, err := p.store.HGetAll(keyHashKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get key details for key ID %d: %w", keyID, err)
+		}
+
+		failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
+		createdAt, _ := strconv.ParseInt(keyDetails["created_at"], 10, 64)
+
+		// Decrypt the key value for use by channels
+		encryptedKeyValue := keyDetails["key_string"]
+		decryptedKeyValue, err := p.encryptionSvc.Decrypt(encryptedKeyValue)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"keyID": keyID,
+				"error": err,
+			}).Debug("Failed to decrypt key value, using as-is for backward compatibility")
+			decryptedKeyValue = encryptedKeyValue
+		}
+
+		apiKey := &models.APIKey{
+			ID:           uint(keyID),
+			KeyValue:     decryptedKeyValue,
+			Status:       keyDetails["status"],
+			FailureCount: failureCount,
+			GroupID:      groupID,
+			CreatedAt:    time.Unix(createdAt, 0),
+		}
+
+		return apiKey, nil
 	}
 
-	keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse key ID '%s': %w", keyIDStr, err)
-	}
+	// All attempted keys are either excluded or in cooldown
+	return nil, app_errors.ErrNoActiveKeys
+}
 
-	// 2. Get key details from HASH
-	keyHashKey := fmt.Sprintf("key:%d", keyID)
-	keyDetails, err := p.store.HGetAll(keyHashKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get key details for key ID %d: %w", keyID, err)
-	}
-
-	// 3. Manually unmarshal the map into an APIKey struct
-	failureCount, _ := strconv.ParseInt(keyDetails["failure_count"], 10, 64)
-	createdAt, _ := strconv.ParseInt(keyDetails["created_at"], 10, 64)
-
-	// Decrypt the key value for use by channels
-	encryptedKeyValue := keyDetails["key_string"]
-	decryptedKeyValue, err := p.encryptionSvc.Decrypt(encryptedKeyValue)
-	if err != nil {
-		// If decryption fails, try to use the value as-is (backward compatibility for unencrypted keys)
-		logrus.WithFields(logrus.Fields{
-			"keyID": keyID,
-			"error": err,
-		}).Debug("Failed to decrypt key value, using as-is for backward compatibility")
-		decryptedKeyValue = encryptedKeyValue
-	}
-
-	apiKey := &models.APIKey{
-		ID:           uint(keyID),
-		KeyValue:     decryptedKeyValue,
-		Status:       keyDetails["status"],
-		FailureCount: failureCount,
-		GroupID:      groupID,
-		CreatedAt:    time.Unix(createdAt, 0),
-	}
-
-	return apiKey, nil
+// SetKeyCooldown sets a cooldown period for a key, preventing it from being selected.
+func (p *KeyProvider) SetKeyCooldown(keyID uint, duration time.Duration) {
+	cooldownKey := fmt.Sprintf("cooldown:%d", keyID)
+	_ = p.store.Set(cooldownKey, []byte("1"), duration)
+	logrus.WithFields(logrus.Fields{
+		"keyID":    keyID,
+		"cooldown": duration.String(),
+	}).Debug("Key cooldown set")
 }
 
 // UpdateStatus 异步地提交一个 Key 状态更新任务。
