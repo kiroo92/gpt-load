@@ -13,6 +13,7 @@ var unCountedSubstrings = []string{
 	"rate_limit_exceeded",
 	"enhance_your_calm",
 	"too many requests",
+	"too many pending requests",
 	"quota exceeded",
 	"concurrency limit exceeded",
 }

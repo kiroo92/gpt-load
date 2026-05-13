@@ -30,6 +30,7 @@ func IsRateLimitError(errorMsg string) bool {
 		strings.Contains(lower, "enhance_your_calm") ||
 		strings.Contains(lower, "resource has been exhausted") ||
 		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "too many pending requests") ||
 		strings.Contains(lower, "quota exceeded") ||
 		strings.Contains(lower, "concurrency limit exceeded")
 }
