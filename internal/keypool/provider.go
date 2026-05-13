@@ -39,14 +39,19 @@ func (p *KeyProvider) SelectKey(groupID uint) (*models.APIKey, error) {
 	return p.SelectKeyWithExclusion(groupID, nil)
 }
 
-// maxSelectAttempts limits how many Rotate calls we make before giving up.
-// With large key pools (tens of thousands), we need enough attempts to skip
-// over keys that are in cooldown. Rotate + Exists are both O(1) Redis ops.
-const maxSelectAttempts = 500
-
 // SelectKeyWithExclusion 选择一个可用的 APIKey，跳过排除列表中的 key 和处于冷却期的 key。
+// 最多尝试遍历整个 active key 列表，确保不会遗漏可用 key。
 func (p *KeyProvider) SelectKeyWithExclusion(groupID uint, excludeKeyIDs []uint) (*models.APIKey, error) {
 	activeKeysListKey := fmt.Sprintf("group:%d:active_keys", groupID)
+
+	// Get total active keys count to use as upper bound
+	totalKeys, err := p.store.LLen(activeKeysListKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active keys count: %w", err)
+	}
+	if totalKeys == 0 {
+		return nil, app_errors.ErrNoActiveKeys
+	}
 
 	// Build exclusion set for O(1) lookup
 	excludeSet := make(map[uint]struct{}, len(excludeKeyIDs))
@@ -54,11 +59,10 @@ func (p *KeyProvider) SelectKeyWithExclusion(groupID uint, excludeKeyIDs []uint)
 		excludeSet[id] = struct{}{}
 	}
 
-	// Use full maxSelectAttempts - with large key pools and many keys in cooldown,
-	// we need enough attempts to find a usable key.
-	attempts := maxSelectAttempts
-
-	for i := 0; i < attempts; i++ {
+	// Try up to totalKeys attempts - this guarantees we check every key in the pool.
+	// Each iteration is just Rotate (O(1)) + Exists (O(1)) in Redis, so even 37000
+	// iterations complete in under a second.
+	for i := int64(0); i < totalKeys; i++ {
 		keyIDStr, err := p.store.Rotate(activeKeysListKey)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {

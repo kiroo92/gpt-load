@@ -110,8 +110,13 @@ func (ps *ProxyServer) HandleProxy(c *gin.Context) {
 
 	isStream := channelHandler.IsStreamRequest(c, bodyBytes)
 
-	ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, finalBodyBytes, isStream, startTime, 0, nil)
+	ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, finalBodyBytes, isStream, startTime, 0, nil, 0)
 }
+
+// maxRateLimitRetries is the maximum number of times we'll retry due to rate limiting.
+// This prevents a single request from trying thousands of keys when most are rate limited.
+// With 37000 keys, trying 50 different keys should be more than enough to find a working one.
+const maxRateLimitRetries = 50
 
 // executeRequestWithRetry is the core recursive function for handling requests and retries.
 func (ps *ProxyServer) executeRequestWithRetry(
@@ -124,6 +129,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	startTime time.Time,
 	retryCount int,
 	excludeKeyIDs []uint,
+	rateLimitRetries int,
 ) {
 	cfg := group.EffectiveConfig
 
@@ -248,14 +254,17 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		// Add current key to exclusion list for next retry
 		excludeKeyIDs = append(excludeKeyIDs, apiKey.ID)
 
-		// Rate limit errors don't consume retry count - only real failures do
+		// Rate limit errors don't consume retry count - only real failures do.
+		// But we cap total rate limit retries to avoid trying thousands of keys.
 		nextRetryCount := retryCount + 1
+		nextRateLimitRetries := rateLimitRetries
 		if isRateLimit {
 			nextRetryCount = retryCount
+			nextRateLimitRetries = rateLimitRetries + 1
 		}
 
 		// 判断是否为最后一次尝试
-		isLastAttempt := nextRetryCount > cfg.MaxRetries
+		isLastAttempt := nextRetryCount > cfg.MaxRetries || nextRateLimitRetries > maxRateLimitRetries
 		requestType := models.RequestTypeRetry
 		if isLastAttempt {
 			requestType = models.RequestTypeFinal
@@ -274,7 +283,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			return
 		}
 
-		ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, nextRetryCount, excludeKeyIDs)
+		ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, nextRetryCount, excludeKeyIDs, nextRateLimitRetries)
 		return
 	}
 
