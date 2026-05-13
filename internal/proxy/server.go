@@ -326,6 +326,9 @@ func (ps *ProxyServer) executeRequestWithRetry(
 				return
 			}
 
+			// Decompress gzip if needed
+			respBody = handleGzipCompression(resp, respBody)
+
 			// Check for empty content in chat completion responses
 			if isEmptyContentResponse(respBody) {
 				if rateLimitRetries < maxRateLimitRetries {
