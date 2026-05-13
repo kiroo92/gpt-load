@@ -14,6 +14,7 @@ var unCountedSubstrings = []string{
 	"enhance_your_calm",
 	"too many requests",
 	"quota exceeded",
+	"concurrency limit exceeded",
 }
 
 // IsUnCounted checks if the given error message contains substrings
