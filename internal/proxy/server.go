@@ -278,8 +278,17 @@ func (ps *ProxyServer) executeRequestWithRetry(
 
 		// 如果是最后一次尝试，直接返回错误，不再递归
 		if isLastAttempt {
-			if isStream {
-				// For streaming requests, return error in SSE format
+			// If the final error is a rate limit, return a standard 429 response
+			// regardless of stream mode - clients handle 429 status code properly.
+			if isRateLimit {
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"error": gin.H{
+						"message": parsedError,
+						"type":    "rate_limit_error",
+						"code":    "rate_limit_exceeded",
+					},
+				})
+			} else if isStream {
 				ps.writeStreamError(c, statusCode, parsedError)
 			} else {
 				var errorJSON map[string]any
