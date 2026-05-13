@@ -95,3 +95,24 @@ func isEmptyContentResponse(body []byte) bool {
 
 	return false
 }
+
+// extractTokenUsage parses the usage field from an OpenAI-compatible response body.
+// Returns (promptTokens, completionTokens). Returns (0, 0) if parsing fails.
+func extractTokenUsage(body []byte) (int, int) {
+	if len(body) == 0 {
+		return 0, 0
+	}
+
+	var result struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, 0
+	}
+
+	return result.Usage.PromptTokens, result.Usage.CompletionTokens
+}

@@ -311,10 +311,14 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	// Check if this is a model list request (needs special handling)
 	if shouldInterceptModelList(c.Request.URL.Path, c.Request.Method) {
 		ps.handleModelListResponse(c, resp, group, channelHandler)
+		ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
 	} else {
+		var respBody []byte
+
 		// For non-stream responses, check if the response has empty content (TPM exhausted mid-request)
 		if !isStream {
-			respBody, readErr := io.ReadAll(resp.Body)
+			var readErr error
+			respBody, readErr = io.ReadAll(resp.Body)
 			if readErr != nil {
 				logrus.Errorf("Failed to read success response body: %v", readErr)
 				for key, values := range resp.Header {
@@ -373,9 +377,9 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			c.Status(resp.StatusCode)
 			ps.handleStreamingResponse(c, resp)
 		}
-	}
 
-	ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+		ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal, respBody)
+	}
 }
 
 func shouldFailoverOnStatusCode(statusCode int, group *models.Group) bool {
@@ -399,33 +403,47 @@ func (ps *ProxyServer) logRequest(
 	channelHandler channel.ChannelProxy,
 	bodyBytes []byte,
 	requestType string,
+	respBody ...[]byte,
 ) {
 	if ps.requestLogService == nil {
 		return
 	}
 
-	var requestBodyToLog, userAgent string
+	var requestBodyToLog, responseBodyToLog, userAgent string
 
 	if group.EffectiveConfig.EnableRequestBodyLogging {
 		requestBodyToLog = utils.TruncateString(string(bodyBytes), 65000)
 		userAgent = c.Request.UserAgent()
+		// Log response body when detailed logging is enabled
+		if len(respBody) > 0 && respBody[0] != nil {
+			responseBodyToLog = utils.TruncateString(string(respBody[0]), 65000)
+		}
+	}
+
+	// Always extract token usage from response body
+	var promptTokens, completionTokens int
+	if len(respBody) > 0 && respBody[0] != nil {
+		promptTokens, completionTokens = extractTokenUsage(respBody[0])
 	}
 
 	duration := time.Since(startTime).Milliseconds()
 
 	logEntry := &models.RequestLog{
-		GroupID:      group.ID,
-		GroupName:    group.Name,
-		IsSuccess:    finalError == nil && statusCode < 400,
-		SourceIP:     c.ClientIP(),
-		StatusCode:   statusCode,
-		RequestPath:  utils.TruncateString(c.Request.URL.String(), 500),
-		Duration:     duration,
-		UserAgent:    userAgent,
-		RequestType:  requestType,
-		IsStream:     isStream,
-		UpstreamAddr: utils.TruncateString(upstreamAddr, 500),
-		RequestBody:  requestBodyToLog,
+		GroupID:          group.ID,
+		GroupName:        group.Name,
+		IsSuccess:        finalError == nil && statusCode < 400,
+		SourceIP:         c.ClientIP(),
+		StatusCode:       statusCode,
+		RequestPath:      utils.TruncateString(c.Request.URL.String(), 500),
+		Duration:         duration,
+		UserAgent:        userAgent,
+		RequestType:      requestType,
+		IsStream:         isStream,
+		UpstreamAddr:     utils.TruncateString(upstreamAddr, 500),
+		RequestBody:      requestBodyToLog,
+		ResponseBody:     responseBodyToLog,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
 	}
 
 	// Set parent group
