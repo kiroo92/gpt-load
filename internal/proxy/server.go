@@ -238,8 +238,9 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		// 使用解析后的错误信息更新密钥状态
 		ps.keyProvider.UpdateStatus(apiKey, group, false, parsedError)
 
-		// If this is a rate limit error, set cooldown on the key
-		if app_errors.IsRateLimitError(parsedError) {
+		// If this is a rate limit error, set cooldown on the key and DON'T consume retry count
+		isRateLimit := app_errors.IsRateLimitError(parsedError)
+		if isRateLimit {
 			cooldown := app_errors.GetCooldownDuration(parsedError)
 			ps.keyProvider.SetKeyCooldown(apiKey.ID, cooldown)
 		}
@@ -247,8 +248,14 @@ func (ps *ProxyServer) executeRequestWithRetry(
 		// Add current key to exclusion list for next retry
 		excludeKeyIDs = append(excludeKeyIDs, apiKey.ID)
 
+		// Rate limit errors don't consume retry count - only real failures do
+		nextRetryCount := retryCount + 1
+		if isRateLimit {
+			nextRetryCount = retryCount
+		}
+
 		// 判断是否为最后一次尝试
-		isLastAttempt := retryCount >= cfg.MaxRetries
+		isLastAttempt := nextRetryCount > cfg.MaxRetries
 		requestType := models.RequestTypeRetry
 		if isLastAttempt {
 			requestType = models.RequestTypeFinal
@@ -267,7 +274,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			return
 		}
 
-		ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, retryCount+1, excludeKeyIDs)
+		ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, nextRetryCount, excludeKeyIDs)
 		return
 	}
 

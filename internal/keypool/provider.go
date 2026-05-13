@@ -40,9 +40,9 @@ func (p *KeyProvider) SelectKey(groupID uint) (*models.APIKey, error) {
 }
 
 // maxSelectAttempts limits how many Rotate calls we make before giving up.
-// This prevents scanning the entire list when there are tens of thousands of keys.
-// In practice, with random distribution, a usable key is found within a few attempts.
-const maxSelectAttempts = 50
+// With large key pools (tens of thousands), we need enough attempts to skip
+// over keys that are in cooldown. Rotate + Exists are both O(1) Redis ops.
+const maxSelectAttempts = 500
 
 // SelectKeyWithExclusion 选择一个可用的 APIKey，跳过排除列表中的 key 和处于冷却期的 key。
 func (p *KeyProvider) SelectKeyWithExclusion(groupID uint, excludeKeyIDs []uint) (*models.APIKey, error) {
@@ -54,14 +54,9 @@ func (p *KeyProvider) SelectKeyWithExclusion(groupID uint, excludeKeyIDs []uint)
 		excludeSet[id] = struct{}{}
 	}
 
-	// Determine max attempts: min(maxSelectAttempts, excludeCount + cooldownBuffer)
-	// If we have very few exclusions, we don't need many attempts.
-	// If no exclusions and no cooldowns, first attempt succeeds.
+	// Use full maxSelectAttempts - with large key pools and many keys in cooldown,
+	// we need enough attempts to find a usable key.
 	attempts := maxSelectAttempts
-	if len(excludeKeyIDs) < 10 {
-		// With few exclusions, limit attempts more aggressively
-		attempts = len(excludeKeyIDs) + 10
-	}
 
 	for i := 0; i < attempts; i++ {
 		keyIDStr, err := p.store.Rotate(activeKeysListKey)
