@@ -116,7 +116,7 @@ func (ps *ProxyServer) HandleProxy(c *gin.Context) {
 // maxRateLimitRetries is the maximum number of times we'll retry due to rate limiting.
 // This prevents a single request from trying thousands of keys when most are rate limited.
 // With 37000 keys, trying 50 different keys should be more than enough to find a working one.
-const maxRateLimitRetries = 50
+const maxRateLimitRetries = 500
 
 // executeRequestWithRetry is the core recursive function for handling requests and retries.
 func (ps *ProxyServer) executeRequestWithRetry(
