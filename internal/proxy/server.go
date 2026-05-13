@@ -136,7 +136,11 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	apiKey, err := ps.keyProvider.SelectKeyWithExclusion(group.ID, excludeKeyIDs)
 	if err != nil {
 		logrus.Errorf("Failed to select a key for group %s on attempt %d: %v", group.Name, retryCount+1, err)
-		response.Error(c, app_errors.NewAPIError(app_errors.ErrNoKeysAvailable, err.Error()))
+		if isStream {
+			ps.writeStreamError(c, http.StatusServiceUnavailable, "No available keys: "+err.Error())
+		} else {
+			response.Error(c, app_errors.NewAPIError(app_errors.ErrNoKeysAvailable, err.Error()))
+		}
 		ps.logRequest(c, originalGroup, group, nil, startTime, http.StatusServiceUnavailable, err, isStream, "", channelHandler, bodyBytes, models.RequestTypeFinal)
 		return
 	}
@@ -274,11 +278,16 @@ func (ps *ProxyServer) executeRequestWithRetry(
 
 		// 如果是最后一次尝试，直接返回错误，不再递归
 		if isLastAttempt {
-			var errorJSON map[string]any
-			if err := json.Unmarshal([]byte(errorMessage), &errorJSON); err == nil {
-				c.JSON(statusCode, errorJSON)
+			if isStream {
+				// For streaming requests, return error in SSE format
+				ps.writeStreamError(c, statusCode, parsedError)
 			} else {
-				response.Error(c, app_errors.NewAPIErrorWithUpstream(statusCode, "UPSTREAM_ERROR", errorMessage))
+				var errorJSON map[string]any
+				if err := json.Unmarshal([]byte(errorMessage), &errorJSON); err == nil {
+					c.JSON(statusCode, errorJSON)
+				} else {
+					response.Error(c, app_errors.NewAPIErrorWithUpstream(statusCode, "UPSTREAM_ERROR", errorMessage))
+				}
 			}
 			return
 		}
