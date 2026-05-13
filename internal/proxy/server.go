@@ -355,6 +355,10 @@ func (ps *ProxyServer) executeRequestWithRetry(
 					c.Header(key, value)
 				}
 			}
+			// Override Content-Type for non-stream responses - upstream Responses API
+			// may return text/event-stream even for non-stream requests, which confuses
+			// downstream clients into thinking it's a streaming response.
+			c.Header("Content-Type", "application/json")
 			c.Status(resp.StatusCode)
 			c.Writer.Write(respBody)
 		} else {
