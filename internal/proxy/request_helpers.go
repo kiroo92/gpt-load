@@ -61,3 +61,37 @@ func handleGzipCompression(resp *http.Response, bodyBytes []byte) []byte {
 	}
 	return bodyBytes
 }
+
+// isEmptyContentResponse checks if a chat completion response has empty content.
+// This happens when a key's TPM is exhausted mid-request - OpenAI returns 200 but
+// with no content in the message. We treat this as a soft failure and retry.
+func isEmptyContentResponse(body []byte) bool {
+	if len(body) == 0 {
+		return true
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content *string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		// Not a chat completion response format, don't treat as empty
+		return false
+	}
+
+	// If no choices at all, it's empty
+	if len(result.Choices) == 0 {
+		return false // Could be a non-chat endpoint, don't interfere
+	}
+
+	// If content is nil or empty string, it's an empty response
+	if result.Choices[0].Message.Content == nil || *result.Choices[0].Message.Content == "" {
+		return true
+	}
+
+	return false
+}

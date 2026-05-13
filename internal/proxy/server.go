@@ -312,17 +312,59 @@ func (ps *ProxyServer) executeRequestWithRetry(
 	if shouldInterceptModelList(c.Request.URL.Path, c.Request.Method) {
 		ps.handleModelListResponse(c, resp, group, channelHandler)
 	} else {
-		for key, values := range resp.Header {
-			for _, value := range values {
-				c.Header(key, value)
+		// For non-stream responses, check if the response has empty content (TPM exhausted mid-request)
+		if !isStream {
+			respBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				logrus.Errorf("Failed to read success response body: %v", readErr)
+				for key, values := range resp.Header {
+					for _, value := range values {
+						c.Header(key, value)
+					}
+				}
+				c.Status(resp.StatusCode)
+				return
 			}
-		}
-		c.Status(resp.StatusCode)
 
-		if isStream {
-			ps.handleStreamingResponse(c, resp)
+			// Check for empty content in chat completion responses
+			if isEmptyContentResponse(respBody) {
+				if rateLimitRetries < maxRateLimitRetries {
+					logrus.Debugf("Empty content response from key %s, retrying with different key", utils.MaskAPIKey(apiKey.KeyValue))
+					// Set a short cooldown on this key
+					ps.keyProvider.SetKeyCooldown(apiKey.ID, app_errors.MinCooldownDuration)
+					excludeKeyIDs = append(excludeKeyIDs, apiKey.ID)
+					ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, errors.New("empty content response"), isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeRetry)
+					ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, retryCount, excludeKeyIDs, rateLimitRetries+1)
+					return
+				}
+				// All retries exhausted, return 429 instead of empty content
+				ps.logRequest(c, originalGroup, group, apiKey, startTime, http.StatusTooManyRequests, errors.New("all keys returned empty content"), isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal)
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"error": gin.H{
+						"message": "All available keys are currently rate limited. Please try again later.",
+						"type":    "rate_limit_error",
+						"code":    "rate_limit_exceeded",
+					},
+				})
+				return
+			}
+
+			// Normal success - write response
+			for key, values := range resp.Header {
+				for _, value := range values {
+					c.Header(key, value)
+				}
+			}
+			c.Status(resp.StatusCode)
+			c.Writer.Write(respBody)
 		} else {
-			ps.handleNormalResponse(c, resp)
+			for key, values := range resp.Header {
+				for _, value := range values {
+					c.Header(key, value)
+				}
+			}
+			c.Status(resp.StatusCode)
+			ps.handleStreamingResponse(c, resp)
 		}
 	}
 
