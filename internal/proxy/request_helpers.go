@@ -97,22 +97,88 @@ func isEmptyContentResponse(body []byte) bool {
 }
 
 // extractTokenUsage parses the usage field from an OpenAI-compatible response body.
+// Supports both regular JSON responses and SSE streaming responses.
 // Returns (promptTokens, completionTokens). Returns (0, 0) if parsing fails.
 func extractTokenUsage(body []byte) (int, int) {
 	if len(body) == 0 {
 		return 0, 0
 	}
 
-	var result struct {
-		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-		} `json:"usage"`
+	// Try parsing as regular JSON first
+	if p, c := parseUsageFromJSON(body); p > 0 || c > 0 {
+		return p, c
 	}
 
-	if err := json.Unmarshal(body, &result); err != nil {
+	// Try parsing as SSE stream - scan all data: lines for usage info
+	for i := 0; i < len(body); {
+		dataStart := bytes.Index(body[i:], []byte("data:"))
+		if dataStart < 0 {
+			break
+		}
+		dataStart += i + 5 // skip "data:"
+
+		// Skip whitespace
+		for dataStart < len(body) && (body[dataStart] == ' ' || body[dataStart] == '\t') {
+			dataStart++
+		}
+
+		lineEnd := bytes.Index(body[dataStart:], []byte("\n"))
+		if lineEnd < 0 {
+			lineEnd = len(body) - dataStart
+		}
+
+		line := body[dataStart : dataStart+lineEnd]
+		i = dataStart + lineEnd + 1
+
+		if p, c := parseUsageFromJSON(line); p > 0 || c > 0 {
+			return p, c
+		}
+	}
+
+	return 0, 0
+}
+
+// parseUsageFromJSON tries to extract token usage from a single JSON object.
+func parseUsageFromJSON(data []byte) (int, int) {
+	var result struct {
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			InputTokens      int `json:"input_tokens"`
+			OutputTokens     int `json:"output_tokens"`
+		} `json:"usage"`
+		Response *struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+				PromptTokens int `json:"prompt_tokens"`
+				OutputTotal  int `json:"completion_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+
+	if err := json.Unmarshal(data, &result); err != nil {
 		return 0, 0
 	}
 
-	return result.Usage.PromptTokens, result.Usage.CompletionTokens
+	if result.Usage != nil {
+		if result.Usage.PromptTokens > 0 || result.Usage.CompletionTokens > 0 {
+			return result.Usage.PromptTokens, result.Usage.CompletionTokens
+		}
+		if result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0 {
+			return result.Usage.InputTokens, result.Usage.OutputTokens
+		}
+	}
+
+	if result.Response != nil {
+		u := result.Response.Usage
+		if u.PromptTokens > 0 || u.OutputTotal > 0 {
+			return u.PromptTokens, u.OutputTotal
+		}
+		if u.InputTokens > 0 || u.OutputTokens > 0 {
+			return u.InputTokens, u.OutputTokens
+		}
+	}
+
+	return 0, 0
 }

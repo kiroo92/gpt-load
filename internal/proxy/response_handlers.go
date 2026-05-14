@@ -8,7 +8,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func (ps *ProxyServer) handleStreamingResponse(c *gin.Context, resp *http.Response) {
+// handleStreamingResponse forwards the streaming response to the client.
+// Returns the captured stream content for logging purposes (capped to avoid memory issues).
+func (ps *ProxyServer) handleStreamingResponse(c *gin.Context, resp *http.Response) []byte {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -18,8 +20,11 @@ func (ps *ProxyServer) handleStreamingResponse(c *gin.Context, resp *http.Respon
 	if !ok {
 		logrus.Error("Streaming unsupported by the writer, falling back to normal response")
 		ps.handleNormalResponse(c, resp)
-		return
+		return nil
 	}
+
+	const maxCaptureSize = 65536 // Cap captured body to 64KB
+	captured := make([]byte, 0, 8192)
 
 	buf := make([]byte, 4*1024)
 	for {
@@ -27,18 +32,28 @@ func (ps *ProxyServer) handleStreamingResponse(c *gin.Context, resp *http.Respon
 		if n > 0 {
 			if _, writeErr := c.Writer.Write(buf[:n]); writeErr != nil {
 				logUpstreamError("writing stream to client", writeErr)
-				return
+				return captured
 			}
 			flusher.Flush()
+			// Capture content for logging (with size cap)
+			if len(captured) < maxCaptureSize {
+				remaining := maxCaptureSize - len(captured)
+				toCopy := n
+				if toCopy > remaining {
+					toCopy = remaining
+				}
+				captured = append(captured, buf[:toCopy]...)
+			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			logUpstreamError("reading from upstream", err)
-			return
+			return captured
 		}
 	}
+	return captured
 }
 
 func (ps *ProxyServer) handleNormalResponse(c *gin.Context, resp *http.Response) {

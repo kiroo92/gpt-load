@@ -375,7 +375,7 @@ func (ps *ProxyServer) executeRequestWithRetry(
 				}
 			}
 			c.Status(resp.StatusCode)
-			ps.handleStreamingResponse(c, resp)
+			respBody = ps.handleStreamingResponse(c, resp)
 		}
 
 		ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal, respBody)
