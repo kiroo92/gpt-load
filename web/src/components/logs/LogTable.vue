@@ -298,6 +298,18 @@ const allColumnConfigs: ColumnConfig[] = [
     required: true, // 必选字段
   },
   {
+    key: "tokens",
+    title: "Tokens (in/out)",
+    width: 130,
+    defaultVisible: true,
+    render: (row: LogRow) => {
+      const inT = row.prompt_tokens || 0;
+      const outT = row.completion_tokens || 0;
+      if (inT === 0 && outT === 0) return "-";
+      return `${inT} / ${outT}`;
+    },
+  },
+  {
     key: "key_value",
     title: "Key",
     width: 200,
@@ -893,6 +905,33 @@ const deselectAllColumns = () => {
                 </div>
                 <div class="compact-field-content">
                   {{ formatJsonString(selectedLog.request_body) }}
+                </div>
+              </div>
+
+              <div class="compact-field" v-if="selectedLog.response_body">
+                <div class="compact-field-header">
+                  <span class="compact-field-title">Response</span>
+                  <n-button
+                    size="tiny"
+                    text
+                    @click="copyContent(formatJsonString(selectedLog.response_body), 'Response')"
+                  >
+                    <template #icon>
+                      <n-icon :component="CopyOutline" />
+                    </template>
+                  </n-button>
+                </div>
+                <div class="compact-field-content">
+                  {{ formatJsonString(selectedLog.response_body) }}
+                </div>
+              </div>
+
+              <div class="compact-field" v-if="(selectedLog.prompt_tokens ?? 0) + (selectedLog.completion_tokens ?? 0) > 0">
+                <div class="compact-field-header">
+                  <span class="compact-field-title">Token Usage</span>
+                </div>
+                <div class="compact-field-content">
+                  Input: {{ selectedLog.prompt_tokens || 0 }} / Output: {{ selectedLog.completion_tokens || 0 }} / Total: {{ (selectedLog.prompt_tokens || 0) + (selectedLog.completion_tokens || 0) }}
                 </div>
               </div>
             </div>
