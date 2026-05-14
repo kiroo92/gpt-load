@@ -182,3 +182,90 @@ func parseUsageFromJSON(data []byte) (int, int) {
 
 	return 0, 0
 }
+
+// peekStreamForError reads up to maxBytes from the response body to inspect for inline errors.
+// Returns the read bytes; the caller must prepend them when forwarding to the client.
+func peekStreamForError(body io.Reader, maxBytes int) ([]byte, error) {
+	buf := make([]byte, maxBytes)
+	n, err := io.ReadFull(body, buf)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		// Stream ended before maxBytes - that's fine, return what we got
+		return buf[:n], nil
+	}
+	if err != nil {
+		return buf[:n], err
+	}
+	return buf[:n], nil
+}
+
+// containsStreamError checks if the SSE stream chunk contains an error event.
+func containsStreamError(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	// OpenAI Responses API: "event: error" or "type":"error"
+	if bytes.Contains(data, []byte("event: error")) ||
+		bytes.Contains(data, []byte("event:error")) {
+		return true
+	}
+	// Look for inline error payloads
+	if bytes.Contains(data, []byte(`"type":"error"`)) {
+		return true
+	}
+	if bytes.Contains(data, []byte(`"status":"failed"`)) {
+		return true
+	}
+	if bytes.Contains(data, []byte(`"code":"rate_limit_exceeded"`)) {
+		return true
+	}
+	return false
+}
+
+// extractStreamErrorMessage tries to extract an error message from an SSE error event.
+func extractStreamErrorMessage(data []byte) string {
+	// Scan SSE data: lines and look for error.message
+	for i := 0; i < len(data); {
+		dataStart := bytes.Index(data[i:], []byte("data:"))
+		if dataStart < 0 {
+			break
+		}
+		dataStart += i + 5
+
+		for dataStart < len(data) && (data[dataStart] == ' ' || data[dataStart] == '\t') {
+			dataStart++
+		}
+
+		lineEnd := bytes.Index(data[dataStart:], []byte("\n"))
+		if lineEnd < 0 {
+			lineEnd = len(data) - dataStart
+		}
+
+		line := data[dataStart : dataStart+lineEnd]
+		i = dataStart + lineEnd + 1
+
+		var parsed struct {
+			Type  string `json:"type"`
+			Error struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+			Response struct {
+				Error struct {
+					Message string `json:"message"`
+					Code    string `json:"code"`
+				} `json:"error"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(line, &parsed); err != nil {
+			continue
+		}
+
+		if parsed.Error.Message != "" {
+			return parsed.Error.Message
+		}
+		if parsed.Response.Error.Message != "" {
+			return parsed.Response.Error.Message
+		}
+	}
+	return "stream returned error event"
+}

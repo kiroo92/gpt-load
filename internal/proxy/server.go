@@ -369,13 +369,62 @@ func (ps *ProxyServer) executeRequestWithRetry(
 			c.Status(resp.StatusCode)
 			c.Writer.Write(respBody)
 		} else {
+			// Pre-check stream for inline errors (e.g., rate limit returned mid-stream with HTTP 200).
+			// We peek at the first part of the response - if it contains an error event, treat as failure.
+			peekBuf, peekErr := peekStreamForError(resp.Body, 8192)
+			if peekErr == nil && containsStreamError(peekBuf) {
+				inlineErr := extractStreamErrorMessage(peekBuf)
+				logrus.Debugf("Stream returned HTTP 200 but contains inline error from key %s: %s", utils.MaskAPIKey(apiKey.KeyValue), inlineErr)
+
+				// Treat as rate limit if the error matches rate limit patterns
+				if app_errors.IsRateLimitError(inlineErr) {
+					cooldown := app_errors.GetCooldownDuration(inlineErr)
+					ps.keyProvider.SetKeyCooldown(apiKey.ID, cooldown)
+				}
+
+				excludeKeyIDs = append(excludeKeyIDs, apiKey.ID)
+				ps.logRequest(c, originalGroup, group, apiKey, startTime, http.StatusTooManyRequests, errors.New(inlineErr), isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeRetry, peekBuf)
+
+				// Retry with another key if we still have budget
+				if rateLimitRetries < maxRateLimitRetries {
+					ps.executeRequestWithRetry(c, channelHandler, originalGroup, group, bodyBytes, isStream, startTime, retryCount, excludeKeyIDs, rateLimitRetries+1)
+					return
+				}
+
+				// All retries exhausted, return 429
+				c.JSON(http.StatusTooManyRequests, gin.H{
+					"error": gin.H{
+						"message": "All available keys are currently rate limited. Please try again later.",
+						"type":    "rate_limit_error",
+						"code":    "rate_limit_exceeded",
+					},
+				})
+				return
+			}
+
+			// Forward headers and start streaming
 			for key, values := range resp.Header {
 				for _, value := range values {
 					c.Header(key, value)
 				}
 			}
 			c.Status(resp.StatusCode)
+
+			// Write the peeked content first, then continue streaming the rest
+			if len(peekBuf) > 0 {
+				c.Writer.Write(peekBuf)
+				if flusher, ok := c.Writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			}
 			respBody = ps.handleStreamingResponse(c, resp)
+			// Prepend the peek buffer to captured body for logging
+			if len(peekBuf) > 0 {
+				combined := make([]byte, 0, len(peekBuf)+len(respBody))
+				combined = append(combined, peekBuf...)
+				combined = append(combined, respBody...)
+				respBody = combined
+			}
 		}
 
 		ps.logRequest(c, originalGroup, group, apiKey, startTime, resp.StatusCode, nil, isStream, upstreamURL, channelHandler, bodyBytes, models.RequestTypeFinal, respBody)

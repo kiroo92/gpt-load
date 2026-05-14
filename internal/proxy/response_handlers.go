@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"io"
 	"net/http"
 
@@ -9,7 +11,8 @@ import (
 )
 
 // handleStreamingResponse forwards the streaming response to the client.
-// Returns the captured stream content for logging purposes (capped to avoid memory issues).
+// While forwarding, it scans SSE events to extract usage info and capture key events
+// for logging. Returns the captured/distilled body for logging purposes.
 func (ps *ProxyServer) handleStreamingResponse(c *gin.Context, resp *http.Response) []byte {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -23,36 +26,81 @@ func (ps *ProxyServer) handleStreamingResponse(c *gin.Context, resp *http.Respon
 		return nil
 	}
 
-	const maxCaptureSize = 65536 // Cap captured body to 64KB
-	captured := make([]byte, 0, 8192)
+	const maxCaptureSize = 32768 // Cap captured non-delta events to 32KB
 
-	buf := make([]byte, 4*1024)
+	// We capture only meaningful events (skip delta events that just contain partial text)
+	// and always keep the last event (which usually contains usage info)
+	captured := make([]byte, 0, 4096)
+	var lastEvent []byte
+
+	// Use a line-buffered reader to scan SSE events
+	reader := bufio.NewReaderSize(resp.Body, 16*1024)
+
 	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, writeErr := c.Writer.Write(buf[:n]); writeErr != nil {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			// Forward to client immediately
+			if _, writeErr := c.Writer.Write(line); writeErr != nil {
 				logUpstreamError("writing stream to client", writeErr)
-				return captured
+				return appendCaptured(captured, lastEvent)
 			}
 			flusher.Flush()
-			// Capture content for logging (with size cap)
-			if len(captured) < maxCaptureSize {
-				remaining := maxCaptureSize - len(captured)
-				toCopy := n
-				if toCopy > remaining {
-					toCopy = remaining
+
+			// Capture for logging - keep meaningful events
+			if shouldCaptureSSELine(line) {
+				if len(captured) < maxCaptureSize {
+					captured = append(captured, line...)
 				}
-				captured = append(captured, buf[:toCopy]...)
+				// Always remember the most recent meaningful event for usage extraction
+				lastEvent = make([]byte, len(line))
+				copy(lastEvent, line)
 			}
 		}
+
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			logUpstreamError("reading from upstream", err)
-			return captured
+			return appendCaptured(captured, lastEvent)
 		}
 	}
+
+	return appendCaptured(captured, lastEvent)
+}
+
+// shouldCaptureSSELine returns true if the SSE line is worth keeping for logging.
+// Skip output_text.delta events (they're just partial text fragments).
+func shouldCaptureSSELine(line []byte) bool {
+	// Always keep event: lines and empty lines (separators)
+	if len(line) <= 1 {
+		return true
+	}
+	// Filter out delta events which are just text fragments
+	if bytes.Contains(line, []byte(`"type":"response.output_text.delta"`)) {
+		return false
+	}
+	if bytes.Contains(line, []byte(`"object":"chat.completion.chunk"`)) {
+		// For chat completion streams, only keep chunks that have usage or finish_reason
+		if !bytes.Contains(line, []byte(`"usage"`)) && !bytes.Contains(line, []byte(`"finish_reason"`)) {
+			return false
+		}
+	}
+	return true
+}
+
+// appendCaptured appends the last event to the captured buffer if not already there.
+func appendCaptured(captured, lastEvent []byte) []byte {
+	if len(lastEvent) == 0 {
+		return captured
+	}
+	// If last event is already at the end, don't duplicate
+	if len(captured) >= len(lastEvent) && bytes.Equal(captured[len(captured)-len(lastEvent):], lastEvent) {
+		return captured
+	}
+	// Append separator and last event
+	captured = append(captured, '\n')
+	captured = append(captured, lastEvent...)
 	return captured
 }
 
